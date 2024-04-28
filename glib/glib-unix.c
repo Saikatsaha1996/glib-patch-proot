@@ -825,7 +825,8 @@ g_fdwalk_set_cloexec (int lowfd)
 
   g_return_val_if_fail (lowfd >= 0, (errno = EINVAL, -1));
 
-#if defined(HAVE_CLOSE_RANGE) && defined(CLOSE_RANGE_CLOEXEC)
+//#if defined(HAVE_CLOSE_RANGE) && defined(CLOSE_RANGE_CLOEXEC)
+#if defined(_NOPE___DISABLE_THIS__HAVE_CLOSE_RANGE) && defined(CLOSE_RANGE_CLOEXEC)
   /* close_range() is available in Linux since kernel 5.9, and on FreeBSD at
    * around the same time. It was designed for use in async-signal-safe
    * situations: https://bugs.python.org/issue38061
@@ -876,7 +877,8 @@ g_closefrom (int lowfd)
 
   g_return_val_if_fail (lowfd >= 0, (errno = EINVAL, -1));
 
-#if defined(HAVE_CLOSE_RANGE)
+//#if defined(HAVE_CLOSE_RANGE)
+#if defined(_NOPE___DISABLE_THIS__HAVE_CLOSE_RANGE)
   /* close_range() is available in Linux since kernel 5.9, and on FreeBSD at
    * around the same time. It was designed for use in async-signal-safe
    * situations: https://bugs.python.org/issue38061
