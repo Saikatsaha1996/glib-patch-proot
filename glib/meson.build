@@ -419,6 +419,7 @@ libglib = library('glib-2.0',
   include_directories : configinc,
   link_with: [charset_lib, gnulib_lib],
   dependencies : [
+    atomic_dep,
     gnulib_libm_dependency,
     libiconv,
     libintl_deps,
@@ -462,26 +463,30 @@ pkg.generate(libglib,
 )
 meson.override_dependency('glib-2.0', libglib_dep)
 
+# FIXME: This needs to be added to the `depends` of every invocation of
+# glib_compile_resources in the build process. We can drop this when
+# https://github.com/mesonbuild/meson/issues/13385 is fixed.
+gspawn_helpers = []
 # On Windows, glib needs a spawn helper for g_spawn* API
 if host_system == 'windows'
   if host_machine.cpu_family() == 'x86'
-    executable('gspawn-win32-helper', 'gspawn-win32-helper.c',
+    gspawn_helpers += executable('gspawn-win32-helper', 'gspawn-win32-helper.c',
       install : true,
       win_subsystem : 'windows',
       include_directories : configinc,
       dependencies : [libglib_dep])
-    executable('gspawn-win32-helper-console', 'gspawn-win32-helper.c',
+    gspawn_helpers += executable('gspawn-win32-helper-console', 'gspawn-win32-helper.c',
       install : true,
       c_args : ['-DHELPER_CONSOLE'],
       include_directories : configinc,
       dependencies : [libglib_dep])
   else
-    executable('gspawn-win64-helper', 'gspawn-win32-helper.c',
+    gspawn_helpers += executable('gspawn-win64-helper', 'gspawn-win32-helper.c',
       install : true,
       win_subsystem : 'windows',
       include_directories : configinc,
       dependencies : [libglib_dep])
-    executable('gspawn-win64-helper-console', 'gspawn-win32-helper.c',
+    gspawn_helpers += executable('gspawn-win64-helper-console', 'gspawn-win32-helper.c',
       install : true,
       c_args : ['-DHELPER_CONSOLE'],
       include_directories : configinc,

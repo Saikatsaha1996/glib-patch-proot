@@ -1807,10 +1807,6 @@ ignore_trash_mount (GUnixMountEntry *mount)
 {
   GUnixMountPoint *mount_point = NULL;
   const gchar *mount_options;
-  gboolean retval = TRUE;
-
-  if (g_unix_mount_is_system_internal (mount))
-    return TRUE;
 
   mount_options = g_unix_mount_get_options (mount);
   if (mount_options == NULL)
@@ -1819,15 +1815,23 @@ ignore_trash_mount (GUnixMountEntry *mount)
                                            NULL);
       if (mount_point != NULL)
         mount_options = g_unix_mount_point_get_options (mount_point);
+
+      g_clear_pointer (&mount_point, g_unix_mount_point_free);
     }
 
-  if (mount_options == NULL ||
-      strstr (mount_options, "x-gvfs-notrash") == NULL)
-    retval = FALSE;
+  if (mount_options != NULL)
+    {
+      if (strstr (mount_options, "x-gvfs-trash") != NULL)
+        return FALSE;
 
-  g_clear_pointer (&mount_point, g_unix_mount_point_free);
+      if (strstr (mount_options, "x-gvfs-notrash") != NULL)
+        return TRUE;
+    }
 
-  return retval;
+  if (g_unix_mount_is_system_internal (mount))
+    return TRUE;
+
+  return FALSE;
 }
 
 static gboolean
@@ -1997,6 +2001,8 @@ g_local_file_trash (GFile         *file,
   GVfsClass *class;
   GVfs *vfs;
   int errsv;
+  size_t basename_len;
+  GError *my_error = NULL;
 
   if (glib_should_use_portal ())
     return g_trash_portal_trash_file (file, error);
@@ -2224,39 +2230,90 @@ g_local_file_trash (GFile         *file,
   g_free (trashdir);
 
   basename = g_path_get_basename (local->filename);
+  basename_len = strlen (basename);
   i = 1;
   trashname = NULL;
   infofile = NULL;
-  do {
-    g_free (trashname);
-    g_free (infofile);
-    
-    trashname = get_unique_filename (basename, i++);
-    infoname = g_strconcat (trashname, ".trashinfo", NULL);
-    infofile = g_build_filename (infodir, infoname, NULL);
-    g_free (infoname);
+  while (TRUE)
+    {
+      g_free (trashname);
+      g_free (infofile);
 
-    fd = g_open (infofile, O_CREAT | O_EXCL | O_CLOEXEC, 0666);
-    errsv = errno;
-  } while (fd == -1 && errsv == EEXIST);
+      /* Make sure we can create a unique info file */
+      trashname = get_unique_filename (basename, i++);
+      infoname = g_strconcat (trashname, ".trashinfo", NULL);
+      infofile = g_build_filename (infodir, infoname, NULL);
+      g_free (infoname);
+
+      fd = g_open (infofile, O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+      errsv = errno;
+
+      if (fd == -1)
+        {
+          if (errsv == EEXIST)
+            continue;
+          else if (errsv == ENAMETOOLONG)
+            {
+              if (basename_len <= strlen (".trashinfo"))
+                break; /* fail with ENAMETOOLONG */
+              basename_len -= strlen (".trashinfo");
+              basename[basename_len] = '\0';
+              i = 1;
+              continue;
+            }
+          else
+            break; /* fail with other error */
+        }
+
+      (void) g_close (fd, NULL);
+
+      /* Make sure we can write the info file */
+      if (!g_file_set_contents_full (infofile, NULL, 0,
+                                     G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_ONLY_EXISTING,
+                                     0600, &my_error))
+        {
+          g_unlink (infofile);
+          if (g_error_matches (my_error,
+                               G_FILE_ERROR,
+                               G_FILE_ERROR_NAMETOOLONG))
+            {
+              if (basename_len <= strlen (".XXXXXX"))
+                break; /* fail with ENAMETOOLONG */
+              basename_len -= strlen (".XXXXXX");
+              basename[basename_len] = '\0';
+              i = 1;
+              g_clear_error (&my_error);
+              continue;
+            }
+          else
+            break; /* fail with other error */
+        }
+
+      /* file created */
+      break;
+    }
 
   g_free (basename);
   g_free (infodir);
 
-  if (fd == -1)
+  if (fd == -1 || my_error)
     {
       g_free (filesdir);
       g_free (topdir);
       g_free (trashname);
       g_free (infofile);
 
-      g_set_io_error (error,
-		      _("Unable to create trashing info file for %s: %s"),
-                      file, errsv);
+      if (my_error)
+        g_propagate_error (error, my_error);
+      else
+        {
+          g_set_io_error (error,
+                          _("Unable to create trashing info file for %s: %s"),
+                          file, errsv);
+        }
+
       return FALSE;
     }
-
-  (void) g_close (fd, NULL);
 
   /* Write the full content of the info file before trashing to make
    * sure someone doesn't read an empty file.  See #749314
@@ -2284,6 +2341,7 @@ g_local_file_trash (GFile         *file,
   data = g_strdup_printf ("[Trash Info]\nPath=%s\nDeletionDate=%s\n",
 			  original_name_escaped, delete_time);
   g_free (delete_time);
+  g_clear_pointer (&original_name_escaped, g_free);
 
   if (!g_file_set_contents_full (infofile, data, -1,
                             G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_ONLY_EXISTING,
@@ -2291,12 +2349,15 @@ g_local_file_trash (GFile         *file,
     {
       g_unlink (infofile);
 
+      g_free (data);
       g_free (filesdir);
       g_free (trashname);
       g_free (infofile);
 
       return FALSE;
     }
+
+  g_clear_pointer (&data, g_free);
 
   /* TODO: Maybe we should verify that you can delete the file from the trash
    * before moving it? OTOH, that is hard, as it needs a recursive scan
@@ -2341,9 +2402,6 @@ g_local_file_trash (GFile         *file,
   /* TODO: Do we need to update mtime/atime here after the move? */
 
   g_free (infofile);
-  g_free (data);
-  
-  g_free (original_name_escaped);
   g_free (trashname);
   
   return TRUE;

@@ -11,11 +11,11 @@ cache:
     - _ccache/
 
 variables:
-  FEDORA_IMAGE: "registry.gitlab.gnome.org/gnome/glib/fedora:v26"
+  FEDORA_IMAGE: "registry.gitlab.gnome.org/gnome/glib/fedora:v27"
   COVERITY_IMAGE: "registry.gitlab.gnome.org/gnome/glib/coverity:v7"
   DEBIAN_IMAGE: "registry.gitlab.gnome.org/gnome/glib/debian-stable:v19"
   ALPINE_IMAGE: "registry.gitlab.gnome.org/gnome/glib/alpine:v3"
-  MINGW_IMAGE: "registry.gitlab.gnome.org/gnome/glib/mingw:v15"
+  MINGW_IMAGE: "registry.gitlab.gnome.org/gnome/glib/mingw:v16"
   MESON_TEST_TIMEOUT_MULTIPLIER: 4
   G_MESSAGES_DEBUG: all
   MESON_COMMON_OPTIONS: "--buildtype debug --wrap-mode=nodownload --fatal-meson-warnings"
@@ -185,8 +185,8 @@ fedora-x86_64:
             --prefix=$HOME/glib-installed
             --localstatedir=/var
             --libdir=lib
-            -Dsystemtap=true
-            -Ddtrace=true
+            -Dsystemtap=enabled
+            -Ddtrace=enabled
             -Dinstalled_tests=true
             -Ddocumentation=true
             -Dintrospection=enabled
@@ -240,8 +240,8 @@ debian-stable-x86_64:
             --prefix=$HOME/glib-installed
             --localstatedir=/var
             --libdir=lib
-            -Dsystemtap=true
-            -Ddtrace=true
+            -Dsystemtap=enabled
+            -Ddtrace=enabled
             _build
     - meson compile -C _build
     - .gitlab-ci/run-tests.sh
@@ -312,7 +312,6 @@ muslc-alpine-x86_64:
             --prefix=$HOME/glib-installed
             --localstatedir=/var
             --libdir=lib
-            -Dsystemtap=true
             _build
     - meson compile -C _build
     - .gitlab-ci/run-tests.sh
@@ -343,7 +342,7 @@ installed-tests:
             --prefix=/usr --libdir=/usr/lib64
             -Dinstalled_tests=true
             -Ddefault_library=both
-            -Ddtrace=false
+            -Ddtrace=disabled
             _build
     - meson compile -C _build
     - sudo meson install -C _build
@@ -383,8 +382,8 @@ G_DISABLE_ASSERT:
   script:
     - meson setup ${MESON_COMMON_OPTIONS}
             --werror
-            -Dsystemtap=true
-            -Ddtrace=true
+            -Dsystemtap=enabled
+            -Ddtrace=enabled
             -Dinstalled_tests=true
             -Dglib_assert=false
             -Dintrospection=enabled
@@ -421,8 +420,8 @@ valgrind:
   script:
     - meson setup ${MESON_COMMON_OPTIONS}
             --werror
-            -Dsystemtap=true
-            -Ddtrace=true
+            -Dsystemtap=enabled
+            -Ddtrace=enabled
             -Dinstalled_tests=true
             -Dintrospection=enabled
             _build
@@ -492,6 +491,21 @@ cross-mingw64:
       - _build/gthread/libgthread-2.0-0.dll
       - _build/gobject/libgobject-2.0-0.dll
 
+# A note about msys2: it’s a rolling release distribution, running Windows under
+# Docker isn’t really supported, and the win32-ps CI runner is shared. All that
+# adds up to mean that we have to run CI against the latest msys2 packages, and
+# that this occasionally causes build failures in GLib due to changes in msys2.
+# In order to avoid that pre-empting other GLib development, the policy in such
+# cases is to:
+#  1. Immediately and without hesitation make the msys2-* CI jobs non-fatal
+#     (add `allow_failure: true` below).
+#  2. File an issue about fixing the GLib msys2 build and re-enabling failure
+#     on the CI job
+#  3. Set the milestone for that issue to be the next GLib release, so it’s done
+#     in a timely manner; and tag it as ~win32 so the GLib Windows maintainers
+#     are notified and can work on it.
+#  4. Rebase any pending broken MRs on top of the commit which makes the CI job
+#     non-fatal, so that development on `main` is unblocked.
 msys2-mingw32:
   extends: .only-default-and-merges
   stage: build
@@ -520,6 +534,7 @@ msys2-mingw32:
       - _coverage/
       - _reference/
 
+# See the note about msys2 CI job failure policy above.
 msys2-clang64:
   extends: .only-schedules-or-manual
   stage: build
@@ -602,7 +617,7 @@ vs2017-x64-static:
       - _build/meson-logs
 
 freebsd-13-x86_64:
-  extends: .only-origin-or-manual
+  extends: .only-schedules-or-manual
   stage: build
   tags:
     - freebsd-13
@@ -621,7 +636,13 @@ freebsd-13-x86_64:
     # --fatal-meson-warnings. This should be fixed in Meson 1.4. It’s also fine
     # with Meson 1.2.3 (which is what we use on all the other CI runners).
     # See https://github.com/GNOME/glib/commit/71061fdcb33b8c26f5f8467cb3ac10704d65c87d
-    - meson setup --buildtype debug --wrap-mode=nodownload --localstatedir=/var -Db_lundef=false -Dxattr=false _build
+    - meson setup --buildtype debug --wrap-mode=nodownload
+            --localstatedir=/var
+            -Db_lundef=false
+            -Dxattr=false
+            -Dsystemtap=disabled
+            -Ddtrace=disabled
+            _build
     - meson compile -C _build
     - bash -x ./.gitlab-ci/run-tests.sh
   artifacts:
@@ -670,7 +691,6 @@ macos-x86_64:
     - source .venv/bin/activate
     - pip3 install meson==1.2.3
     - pip3 install ninja==1.11.1
-    - pip3 install packaging==23.2
   script:
     # FIXME: Use --wrap-mode=default so we download dependencies each time,
     # until the macOS runner is a VM where we can use a pre-made image which
@@ -750,8 +770,8 @@ scan-build:
             --localstatedir=/var
             --libdir=lib
             -Dglib_debug=enabled
-            -Dsystemtap=true
-            -Ddtrace=true
+            -Dsystemtap=enabled
+            -Ddtrace=enabled
             -Dinstalled_tests=true
             -Dintrospection=enabled
             _scan_build
@@ -780,8 +800,8 @@ scan-build:
             --prefix=$HOME/glib-installed
             --localstatedir=/var
             --libdir=lib
-            -Dsystemtap=true
-            -Ddtrace=true
+            -Dsystemtap=enabled
+            -Ddtrace=enabled
             -Dinstalled_tests=true
             -Dintrospection=enabled
             _coverity_build

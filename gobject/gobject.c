@@ -1020,7 +1020,7 @@ g_object_do_class_init (GObjectClass *class)
    * ]|
    *
    * It is important to note that you must use
-   * [canonical parameter names][canonical-parameter-names] as
+   * [canonical parameter names][class@GObject.ParamSpec#parameter-names] as
    * detail strings for the notify signal.
    */
   gobject_signals[NOTIFY] =
@@ -2992,7 +2992,7 @@ g_object_constructor (GType                  type,
 	  GParamSpec *pspec = construct_params->pspec;
 
 	  construct_params++;
-	  object_set_property (object, pspec, value, nqueue, TRUE);
+	  object_set_property (object, pspec, value, nqueue, FALSE);
 	}
       g_object_notify_queue_thaw (object, nqueue, FALSE);
       /* the notification queue is still frozen from g_object_init(), so

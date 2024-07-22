@@ -28,6 +28,7 @@
 
 #include "girnode-private.h"
 #include "gitypelib-internal.h"
+#include "glib-private.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -120,7 +121,7 @@ struct _ParseContext
 
   GList *modules;
   GList *include_modules;
-  GList *dependencies;
+  GPtrArray *dependencies;
   GHashTable *aliases;
   GHashTable *disguised_structures;
   GHashTable *pointer_structures;
@@ -212,13 +213,10 @@ gi_ir_parser_set_debug (GIIrParser     *parser,
 void
 gi_ir_parser_free (GIIrParser *parser)
 {
-  GList *l;
-
   g_strfreev (parser->includes);
   g_strfreev (parser->gi_gir_path);
 
-  for (l = parser->parsed_modules; l; l = l->next)
-    gi_ir_module_free (l->data);
+  g_clear_list (&parser->parsed_modules, (GDestroyNotify) gi_ir_module_free);
 
   g_slice_free (GIIrParser, parser);
 }
@@ -454,30 +452,24 @@ typedef struct {
   unsigned int is_signed : 1;
 } IntegerAliasInfo;
 
-/*
- * signedness:
- * @T: a numeric type
- *
- * Returns: 1 if @T is signed, 0 if it is unsigned
- */
-#define signedness(T) (((T) -1) <= 0)
-G_STATIC_ASSERT (signedness (int) == 1);
-G_STATIC_ASSERT (signedness (unsigned int) == 0);
-
 static IntegerAliasInfo integer_aliases[] = {
-  { "gchar",    sizeof (gchar),   1 },
-  { "guchar",   sizeof (guchar),  0 },
-  { "gshort",   sizeof (gshort),  1 },
-  { "gushort",  sizeof (gushort), 0 },
-  { "gint",     sizeof (gint),    1 },
-  { "guint",    sizeof (guint),   0 },
-  { "glong",    sizeof (glong),   1 },
-  { "gulong",   sizeof (gulong),  0 },
-  { "gssize",   sizeof (gssize),  1 },
-  { "gsize",    sizeof (gsize),   0 },
-  { "gintptr",  sizeof (gintptr),      1 },
-  { "guintptr", sizeof (guintptr),     0 },
-#define INTEGER_ALIAS(T) { #T, sizeof (T), signedness (T) }
+  /* It is platform-dependent whether gchar is signed or unsigned, but
+   * GObject-Introspection has traditionally treated it as signed,
+   * so continue to hard-code that instead of using INTEGER_ALIAS */
+  { "gchar", sizeof (gchar), 1 },
+
+#define INTEGER_ALIAS(T) { #T, sizeof (T), G_SIGNEDNESS_OF (T) }
+  INTEGER_ALIAS (guchar),
+  INTEGER_ALIAS (gshort),
+  INTEGER_ALIAS (gushort),
+  INTEGER_ALIAS (gint),
+  INTEGER_ALIAS (guint),
+  INTEGER_ALIAS (glong),
+  INTEGER_ALIAS (gulong),
+  INTEGER_ALIAS (gssize),
+  INTEGER_ALIAS (gsize),
+  INTEGER_ALIAS (gintptr),
+  INTEGER_ALIAS (guintptr),
   INTEGER_ALIAS (off_t),
   INTEGER_ALIAS (time_t),
 #ifdef G_OS_UNIX
@@ -1352,8 +1344,6 @@ start_parameter (GMarkupParseContext  *context,
 
   param->closure = closure ? atoi (closure) : -1;
   param->destroy = destroy ? atoi (destroy) : -1;
-
-  ((GIIrNode *)param)->name = g_strdup (name);
 
   switch (CURRENT_NODE (ctx)->type)
     {
@@ -3106,9 +3096,8 @@ start_element_handler (GMarkupParseContext  *context,
               return;
             }
 
-          ctx->dependencies = g_list_prepend (ctx->dependencies,
-                                              g_strdup_printf ("%s-%s", name, version));
-
+          g_ptr_array_insert (ctx->dependencies, 0,
+                              g_strdup_printf ("%s-%s", name, version));
 
           state_switch (ctx, STATE_INCLUDE);
           goto out;
@@ -3196,7 +3185,12 @@ start_element_handler (GMarkupParseContext  *context,
               ctx->include_modules = NULL;
 
               ctx->modules = g_list_append (ctx->modules, ctx->current_module);
-              ctx->current_module->dependencies = ctx->dependencies;
+
+              if (ctx->current_module->dependencies != ctx->dependencies)
+                {
+                  g_clear_pointer (&ctx->current_module->dependencies, g_ptr_array_unref);
+                  ctx->current_module->dependencies = g_ptr_array_ref (ctx->dependencies);
+                }
 
               state_switch (ctx, STATE_NAMESPACE);
               goto out;
@@ -3378,13 +3372,19 @@ state_switch_end_struct_or_union (GMarkupParseContext  *context,
                                   const char           *element_name,
                                   GError              **error)
 {
-  pop_node (ctx);
+  GIIrNode *node = pop_node (ctx);
+
   if (ctx->node_stack == NULL)
     {
       state_switch (ctx, STATE_NAMESPACE);
     }
   else
     {
+      /* In this case the node was not tracked by any other node, so we need
+       * to free the node, or we'd leak.
+       */
+      g_clear_pointer (&node, gi_ir_node_free);
+
       if (CURRENT_NODE (ctx)->type == GI_IR_NODE_STRUCT)
         state_switch (ctx, STATE_STRUCT);
       else if (CURRENT_NODE (ctx)->type == GI_IR_NODE_UNION)
@@ -3736,6 +3736,8 @@ cleanup (GMarkupParseContext *context,
   ParseContext *ctx = user_data;
   GList *m;
 
+  g_clear_slist (&ctx->node_stack, NULL);
+
   for (m = ctx->modules; m; m = m->next)
     gi_ir_module_free (m->data);
   g_list_free (ctx->modules);
@@ -3770,6 +3772,7 @@ gi_ir_parser_parse_string (GIIrParser   *parser,
 {
   ParseContext ctx = { 0 };
   GMarkupParseContext *context;
+  GIIrModule *module = NULL;
 
   ctx.parser = parser;
   ctx.state = STATE_START;
@@ -3780,7 +3783,7 @@ gi_ir_parser_parse_string (GIIrParser   *parser,
   ctx.disguised_structures = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   ctx.pointer_structures = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   ctx.type_depth = 0;
-  ctx.dependencies = NULL;
+  ctx.dependencies = g_ptr_array_new_with_free_func (g_free);
   ctx.current_module = NULL;
 
   context = g_markup_parse_context_new (&firstpass_parser, 0, &ctx, NULL);
@@ -3801,12 +3804,15 @@ gi_ir_parser_parse_string (GIIrParser   *parser,
   if (!g_markup_parse_context_end_parse (context, error))
     goto out;
 
-  parser->parsed_modules = g_list_concat (g_list_copy (ctx.modules),
+  if (ctx.modules)
+    module = ctx.modules->data;
+
+  parser->parsed_modules = g_list_concat (g_steal_pointer (&ctx.modules),
                                           parser->parsed_modules);
 
  out:
 
-  if (ctx.modules == NULL)
+  if (module == NULL)
     {
       /* An error occurred before we created a module, so we haven't
        * transferred ownership of these hash tables to the module.
@@ -3814,13 +3820,16 @@ gi_ir_parser_parse_string (GIIrParser   *parser,
       g_clear_pointer (&ctx.aliases, g_hash_table_unref);
       g_clear_pointer (&ctx.disguised_structures, g_hash_table_unref);
       g_clear_pointer (&ctx.pointer_structures, g_hash_table_unref);
+      g_clear_list (&ctx.modules, (GDestroyNotify) gi_ir_module_free);
       g_list_free (ctx.include_modules);
     }
 
+  g_clear_slist (&ctx.node_stack, NULL);
+  g_clear_pointer (&ctx.dependencies, g_ptr_array_unref);
   g_markup_parse_context_free (context);
 
-  if (ctx.modules)
-    return ctx.modules->data;
+  if (module)
+    return module;
 
   if (error && *error == NULL)
     g_set_error (error,

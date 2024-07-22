@@ -70,6 +70,7 @@ gio_tests = {
     # "LC_COLLATE support for collation orders other than simple codepoint order"
     'can_fail' : linux_libc == 'musl',
   },
+  'converter' : {},
   'credentials' : {},
   'data-input-stream' : {},
   'data-output-stream' : {},
@@ -308,8 +309,12 @@ if host_machine.system() != 'windows'
     },
   }
 
-  # LD_PRELOAD modules don't work so well with AddressSanitizer
-  if have_rtld_next and glib_build_shared and get_option('b_sanitize') == 'none'
+  if have_rtld_next and glib_build_shared
+    asan_env = {}
+    if 'address' in glib_sanitizers
+      asan_env = {'ASAN_OPTIONS': 'verify_asan_link_order=0'}
+    endif
+
     gio_tests += {
       'gsocketclient-slow' : {
         'depends' : [
@@ -324,10 +329,10 @@ if host_machine.system() != 'windows'
         ],
         'env' : {
           'LD_PRELOAD': '@0@/slow-connect-preload.so'.format(meson.current_build_dir())
-        },
+        } + asan_env,
         'installed_tests_env' : {
           'LD_PRELOAD': '@0@/slow-connect-preload.so'.format(installed_tests_execdir),
-        },
+        } + asan_env,
       },
     }
   endif
@@ -490,6 +495,10 @@ if host_machine.system() != 'windows'
         'extra_programs': extra_programs,
       },
       'gdbus-proxy-well-known-name' : {
+        'extra_sources' : extra_sources,
+        'extra_programs': extra_programs,
+      },
+      'gdbus-subscribe' : {
         'extra_sources' : extra_sources,
         'extra_programs': extra_programs,
       },
@@ -831,7 +840,7 @@ if not meson.is_cross_build()
 
   test_gresource = custom_target('test.gresource',
     input : 'test.gresource.xml',
-    depends : test_generated_txt,
+    depends : [test_generated_txt, gspawn_helpers],
     output : 'test.gresource',
     command : [glib_compile_resources,
                compiler_type,
@@ -846,6 +855,7 @@ if not meson.is_cross_build()
 
   test_resources2_c = custom_target('test_resources2.c',
     input : 'test3.gresource.xml',
+    depends : [gspawn_helpers],
     output : 'test_resources2.c',
     command : [glib_compile_resources,
                compiler_type,
@@ -859,6 +869,7 @@ if not meson.is_cross_build()
 
   test_resources2_h = custom_target('test_resources2.h',
     input : 'test3.gresource.xml',
+    depends : [gspawn_helpers],
     output : 'test_resources2.h',
     command : [glib_compile_resources,
                compiler_type,
@@ -872,7 +883,7 @@ if not meson.is_cross_build()
 
   test_resources_c = custom_target('test_resources.c',
     input : 'test2.gresource.xml',
-    depends : big_test_resource,
+    depends : [big_test_resource, gspawn_helpers],
     output : 'test_resources.c',
     command : [glib_compile_resources,
                compiler_type,
@@ -886,6 +897,7 @@ if not meson.is_cross_build()
 
   digit_test_resources_c = custom_target('digit_test_resources.c',
     input : '111_digit_test.gresource.xml',
+    depends : [gspawn_helpers],
     output : 'digit_test_resources.c',
     command : [glib_compile_resources,
                compiler_type,
@@ -899,6 +911,7 @@ if not meson.is_cross_build()
 
   digit_test_resources_h = custom_target('digit_test_resources.h',
     input : '111_digit_test.gresource.xml',
+    depends : [gspawn_helpers],
     output : 'digit_test_resources.h',
     command : [glib_compile_resources,
                compiler_type,
@@ -951,6 +964,7 @@ if not meson.is_cross_build()
 
     test_gresource_binary = custom_target('test5.gresource',
       input : 'test5.gresource.xml',
+      depends : [gspawn_helpers],
       output : 'test5.gresource',
       command : [glib_compile_resources,
                  compiler_type,
@@ -966,6 +980,7 @@ if not meson.is_cross_build()
     # Create resource data file
     test_resources_binary_c = custom_target('test_resources_binary.c',
       input : 'test5.gresource.xml',
+      depends : [gspawn_helpers],
       output : 'test_resources_binary.c',
       command : [glib_compile_resources,
                  compiler_type,
@@ -1081,7 +1096,7 @@ foreach test_name, extra_args : gio_tests
   suite = ['gio'] + extra_args.get('suite', [])
   timeout = suite.contains('slow') ? test_timeout_slow : test_timeout
   local_test_env = test_env
-  depends = [extra_args.get('depends', [])]
+  depends = [extra_args.get('depends', []), gspawn_helpers]
 
   foreach program : extra_args.get('extra_programs', [])
     depends += test_extra_programs_targets[program]

@@ -36,6 +36,9 @@ name = "basic"
 show_index_summary = true
 show_class_hierarchy = true
 
+[source-location]
+base_url = "https://gitlab.gnome.org/GNOME/glib/-/blob/main/"
+
 [extra]
 urlmap_file = "../urlmap.js"
 # The same order will be used when generating the index
@@ -67,5 +70,6 @@ content_files = [
 content_images = [
   "gvfs-overview.png",
   "menu-example.png",
-  "menu-model.png",
+  "menu-model-dark.svg",
+  "menu-model-light.svg",
 ]

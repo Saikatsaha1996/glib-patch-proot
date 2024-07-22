@@ -30,6 +30,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+#ifdef HAVE_FTW_H
+#include <ftw.h>
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1407,6 +1410,61 @@ parse_args (gint    *argc_p,
   *argc_p = e;
 }
 
+#ifdef HAVE_FTW_H
+static int
+rm_rf_nftw_visitor (const char *fpath,
+                    const struct stat *sb,
+                    int typeflag,
+                    struct FTW *ftwbuf)
+{
+  switch (typeflag)
+    {
+    case FTW_DP:
+    case FTW_D:
+    case FTW_DNR:
+      if (g_rmdir (fpath) != 0)
+        {
+          int errsv = errno;
+          g_printerr ("Unable to clean up temporary directory %s: %s\n",
+                      fpath,
+                      g_strerror (errsv));
+        }
+      break;
+
+    default:
+      if (g_remove (fpath) != 0)
+        {
+          int errsv = errno;
+          g_printerr ("Unable to clean up temporary file %s: %s\n",
+                      fpath,
+                      g_strerror (errsv));
+        }
+      break;
+    }
+
+  return 0;
+}
+
+static void
+rm_rf (const gchar *path)
+{
+  /* nopenfd specifies the maximum number of directories that [n]ftw() will
+   * hold open simultaneously. Rather than attempt to determine how many file
+   * descriptors are available, we assume that 5 are available when tearing
+   * down a test case; if that assumption is invalid, the only harm is leaving
+   * a temporary directory on disk.
+   */
+  const int nopenfd = 5;
+  int ret = nftw (path, rm_rf_nftw_visitor, nopenfd, FTW_DEPTH | FTW_MOUNT | FTW_PHYS);
+  if (ret != 0)
+    {
+      int errsv = errno;
+      g_printerr ("Unable to clean up temporary directory %s: %s\n",
+                  path,
+                  g_strerror (errsv));
+    }
+}
+#else
 /* A fairly naive `rm -rf` implementation to clean up after unit tests. */
 static void
 rm_rf (const gchar *path)
@@ -1433,6 +1491,7 @@ rm_rf (const gchar *path)
 
   g_rmdir (path);
 }
+#endif
 
 /* Implement the %G_TEST_OPTION_ISOLATE_DIRS option, iff it’s enabled. Create
  * a temporary directory for this unit test (disambiguated using @test_run_name)
@@ -2937,7 +2996,6 @@ test_case_run (GTestCase  *tc,
   gchar *old_base = NULL;
   GSList **old_free_list, *filename_free_list = NULL;
   gboolean success = G_TEST_RUN_SUCCESS;
-  gboolean free_test_data = TRUE;
 
   old_base = g_strdup (test_uri_base);
   old_free_list = test_filename_free_list;
@@ -2996,7 +3054,7 @@ test_case_run (GTestCase  *tc,
                 }
               if (tc->fixture_teardown)
                 tc->fixture_teardown (fixture, tc->test_data);
-              free_test_data = FALSE;
+              tc->fixture_teardown = NULL;
               if (tc->fixture_size)
                 g_free (fixture);
               g_timer_stop (test_run_timer);
@@ -3013,13 +3071,6 @@ test_case_run (GTestCase  *tc,
       g_clear_pointer (&test_run_msg, g_free);
       g_timer_destroy (test_run_timer);
     }
-
-  /* In case the test didn’t run (due to being skipped or an error), the test
-   * data may still need to be freed, as the client’s main() function may have
-   * passed ownership of it into g_test_add_data_func_full() with a
-   * #GDestroyNotify. */
-  if (free_test_data && tc->fixture_size == 0 && tc->fixture_teardown != NULL)
-    tc->fixture_teardown (tc->test_data, tc->test_data);
 
   g_slist_free_full (filename_free_list, g_free);
   test_filename_free_list = old_free_list;
@@ -3205,6 +3256,13 @@ g_test_run_suite (GTestSuite *suite)
 void
 g_test_case_free (GTestCase *test_case)
 {
+  /* In case the test didn’t run (due to being skipped or an error), the test
+   * data may still need to be freed, as the client’s main() function may have
+   * passed ownership of it into g_test_add_data_func_full() with a
+   * #GDestroyNotify. */
+  if (test_case->fixture_size == 0 && test_case->fixture_teardown != NULL)
+    test_case->fixture_teardown (test_case->test_data, test_case->test_data);
+
   g_free (test_case->name);
   g_slice_free (GTestCase, test_case);
 }

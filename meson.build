@@ -14,7 +14,7 @@ fs = import('fs')
 cc = meson.get_compiler('c')
 c_standards = {}
 
-foreach std : ['90', '99', '11', '17']
+foreach std : ['89', '99', '11', '17']
   arg = (cc.get_id() == 'msvc' ? '/std:' : '-std=') + 'c' + std
   if cc.has_argument(arg)
     c_standards += { std: arg }
@@ -236,8 +236,16 @@ if host_system == 'qnx'
   add_project_arguments('-D_QNX_SOURCE', language: 'c')
 endif
 
+# dummy/empty dependency() object to declare fallbacks and simpler dependencies
+not_found = dependency('', required: false)
+
+get_dll_paths_script = not_found
+
 if host_system == 'windows'
   add_project_arguments(['-DUNICODE', '-D_UNICODE'], language: 'c')
+
+  # Script to obtain paths where the DLLs that we will reside for g-ir-scanner
+  get_dll_paths_script = find_program('tools/grab-gio-dll-paths.py', native: true)
 endif
 
 # Disable strict aliasing;
@@ -245,9 +253,6 @@ endif
 if cc.has_argument('-fno-strict-aliasing')
   add_project_arguments('-fno-strict-aliasing', language: 'c')
 endif
-
-# dummy/empty dependency() object to declare fallbacks and simpler dependencies
-not_found = dependency('', required: false)
 
 ########################
 # Configuration begins #
@@ -385,6 +390,7 @@ headers = [
   'dirent.h', # MSC does not come with this by default
   'float.h',
   'fstab.h',
+  'ftw.h',
   'grp.h',
   'inttypes.h',
   'libproc.h',
@@ -579,6 +585,10 @@ if cc.get_id() == 'gcc' or cc.get_id() == 'clang'
     '-Werror=missing-prototypes',
     '-Werror=pointer-sign',
     '-Wno-string-plus-int',
+    # We require a compiler that supports C11 even though it's not yet a
+    # strict requirement, so allow typedef redefinition not to break clang and
+    # older gcc versions.
+    '-Wno-typedef-redefinition',
   ]
   warning_cxx_args = warning_common_args
   warning_objc_args = warning_c_args
@@ -634,6 +644,11 @@ endif
 # See https://github.com/mesonbuild/meson/pull/3520 for a way to eventually
 # improve this.
 glib_link_flags = cc.get_supported_link_arguments(warning_c_link_args)
+
+glib_sanitizers = get_option('b_sanitize').split(',')
+if glib_sanitizers == ['none']
+  glib_sanitizers = []
+endif
 
 # Windows SDK requirements and checks
 if host_system == 'windows'
@@ -2233,6 +2248,15 @@ libffi_dep = dependency('libffi', version : '>= 3.0.0')
 
 libz_dep = dependency('zlib')
 
+libatomic_test_code = '''
+  int main (int argc, char ** argv) {
+    return 0;
+  }'''
+atomic_dep = []
+if cc.links(libatomic_test_code, args : '-latomic', name : 'check for -latomic')
+  atomic_dep = cc.find_library('atomic')
+endif
+
 # First check in libc, fallback to libintl, and as last chance build
 # proxy-libintl subproject.
 # FIXME: glib-gettext.m4 has much more checks to detect broken/uncompatible
@@ -2433,7 +2457,7 @@ endif
 
 glib_conf.set('HAVE_PROC_SELF_CMDLINE', have_proc_self_cmdline)
 
-python = import('python').find_installation(modules: ['packaging'])
+python = import('python').find_installation()
 
 python_version = python.language_version()
 python_version_req = '>=3.7'
@@ -2505,19 +2529,35 @@ elif host_system == 'cygwin'
 endif
 
 # Tracing: dtrace
-want_dtrace = get_option('dtrace')
-enable_dtrace = false
+dtrace_option = get_option('dtrace')
+enable_dtrace = dtrace_option.allowed()
 
-# Since dtrace support is opt-in we just error out if it was requested but
-# is not available. We don't bother with autodetection yet.
-if want_dtrace
-  if glib_have_carbon
+if glib_have_carbon
+  if dtrace_option.enabled()
     error('GLib dtrace support not yet compatible with macOS dtrace')
+  else
+    enable_dtrace = false
   endif
-  dtrace = find_program('dtrace', required : true) # error out if not found
+endif
+
+if enable_dtrace
+  dtrace = find_program('dtrace', required : dtrace_option)
+  if not dtrace.found()
+    enable_dtrace = false
+  endif
+endif
+
+if enable_dtrace
   if not cc.has_header('sys/sdt.h')
-    error('dtrace support needs sys/sdt.h header')
+    if dtrace_option.enabled()
+      error('dtrace support needs sys/sdt.h header')
+    else
+      enable_dtrace = false
+    endif
   endif
+endif
+
+if enable_dtrace
   # FIXME: autotools build also passes -fPIC -DPIC but is it needed in this case?
   dtrace_obj_gen = generator(dtrace,
     output : '@BASENAME@.o',
@@ -2538,7 +2578,6 @@ with open(output, "w") as f:
   f.write(contents)
 ''', dtrace.full_path(), '-h', '-s', '@INPUT@', '-o', '@OUTPUT@'])
   glib_conf.set('HAVE_DTRACE', 1)
-  enable_dtrace = true
 endif
 
 if cc.has_header_symbol('sys/ptrace.h', 'PTRACE_O_EXITKILL')
@@ -2546,10 +2585,10 @@ if cc.has_header_symbol('sys/ptrace.h', 'PTRACE_O_EXITKILL')
 endif
 
 # systemtap
-want_systemtap = get_option('systemtap')
-enable_systemtap = false
+systemtap = get_option('systemtap').require(enable_dtrace, error_message: 'Cannot enable systemtap because dtrace feature is disabled')
+enable_systemtap = systemtap.allowed()
 
-if want_systemtap and enable_dtrace
+if enable_systemtap
   tapset_install_dir = get_option('tapset_install_dir')
   if tapset_install_dir == ''
     tapset_install_dir = join_paths(get_option('datadir'), 'systemtap/tapset', host_machine.cpu_family())
@@ -2558,7 +2597,6 @@ if want_systemtap and enable_dtrace
   stp_cdata.set('ABS_GLIB_RUNTIME_LIBDIR', glib_libdir)
   stp_cdata.set('LT_CURRENT', minor_version * 100)
   stp_cdata.set('LT_REVISION', micro_version)
-  enable_systemtap = true
 endif
 
 # introspection
@@ -2619,8 +2657,10 @@ if rst2man.found()
   rst2man_flags = [
     '--syntax-highlight=none',
   ]
-  man1_dir = join_paths(glib_prefix, get_option('mandir'), 'man1')
+  man1_dir = glib_prefix / get_option('mandir') / 'man1'
 endif
+
+rst2html5 = find_program('rst2html5', 'rst2html5.py', required: get_option('documentation'))
 
 gnome = import('gnome')
 subdir('docs/reference')
@@ -2682,7 +2722,7 @@ endif
 summary({
   'xattr' : xattr_dep.length() > 0,
   'man-pages' : get_option('man-pages'),
-  'dtrace' : get_option('dtrace'),
+  'dtrace' : enable_dtrace,
   'systemtap' : enable_systemtap,
   'sysprof' : libsysprof_capture_dep.found(),
   'documentation' : get_option('documentation'),
